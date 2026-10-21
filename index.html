@@ -1,0 +1,388 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Scholarship Monitoring and Compliance</title>
+<style>
+  :root { --bg:#f5f6f8; --card:#fff; --ink:#1d2433; --mut:#667085; --line:#e1e5ec; --pri:#2b59c3; --ok:#177245; --bad:#b42318; --warn:#b54708; }
+  * { box-sizing:border-box; }
+  body { margin:0; font:15px/1.45 system-ui,Segoe UI,Roboto,sans-serif; background:var(--bg); color:var(--ink); }
+  header { background:var(--pri); color:#fff; padding:12px 20px; display:flex; justify-content:space-between; align-items:center; gap:10px; flex-wrap:wrap; }
+  header h1 { font-size:17px; margin:0; }
+  main { max-width:1100px; margin:20px auto; padding:0 14px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:16px; margin-bottom:16px; }
+  h2 { font-size:16px; margin:0 0 12px; }
+  label { display:block; font-size:13px; color:var(--mut); margin:8px 0 3px; }
+  input, select, textarea { width:100%; padding:8px 10px; border:1px solid var(--line); border-radius:6px; font:inherit; background:#fff; }
+  button { padding:8px 14px; border:0; border-radius:6px; background:var(--pri); color:#fff; font:inherit; cursor:pointer; }
+  button.sec { background:#e8ecf4; color:var(--ink); }
+  button.ok { background:var(--ok); } button.bad { background:var(--bad); } button.warn { background:var(--warn); }
+  .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:10px; }
+  .stats { display:grid; grid-template-columns:repeat(auto-fit,minmax(160px,1fr)); gap:10px; margin-bottom:12px; }
+  .stat { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:12px; }
+  .stat b { display:block; font-size:26px; }
+  .stat span { color:var(--mut); font-size:13px; }
+  table { width:100%; border-collapse:collapse; font-size:14px; }
+  th, td { text-align:left; padding:8px; border-bottom:1px solid var(--line); vertical-align:top; }
+  th { color:var(--mut); font-weight:600; font-size:12px; text-transform:uppercase; }
+  .wrap { overflow-x:auto; }
+  .badge { display:inline-block; padding:2px 8px; border-radius:99px; font-size:12px; background:#e8ecf4; white-space:nowrap; }
+  .b-ok { background:#d9f2e3; color:var(--ok); } .b-bad { background:#fde4e1; color:var(--bad); } .b-warn { background:#fdecd2; color:var(--warn); }
+  .row { display:flex; gap:8px; flex-wrap:wrap; align-items:end; }
+  .row > * { flex:1; min-width:140px; }
+  .row > button { flex:0 0 auto; }
+  .modal-bg { position:fixed; inset:0; background:rgba(15,20,35,.5); display:flex; align-items:flex-start; justify-content:center; overflow:auto; padding:20px; z-index:10; }
+  .modal { background:#fff; border-radius:12px; padding:18px; max-width:700px; width:100%; }
+  .chk { padding:6px 0; border-bottom:1px solid var(--line); display:flex; gap:8px; }
+  .toast { position:fixed; bottom:18px; left:50%; transform:translateX(-50%); background:#1d2433; color:#fff; padding:10px 16px; border-radius:8px; z-index:20; max-width:90vw; }
+  .toast.err { background:var(--bad); }
+  .mut { color:var(--mut); font-size:13px; }
+  .tabs { display:flex; gap:6px; margin-bottom:12px; }
+  .tabs button { background:#e8ecf4; color:var(--ink); } .tabs button.on { background:var(--pri); color:#fff; }
+  .login { max-width:360px; margin:60px auto; }
+</style>
+</head>
+<body>
+<div id="app"></div>
+<div id="toast" class="toast" style="display:none"></div>
+
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script>
+// ====== CONNECTION (publishable/anon key only. NEVER put service_role here) ======
+const SUPABASE_URL = 'https://beyoyfnqzirsnatkeldy.supabase.co';
+const SUPABASE_KEY = 'sb_publishable_bBZURbFDZTyCrbGj3OzEgw_kZ22vViB';
+const sb = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+
+// ====== STATE ======
+const S = { user:null, profile:null, programs:[], assign:[], profiles:[], subs:[],
+            ay:'2026-2027', sem:1, q:'', fp:'', fc:'', tab:'subs', edit:null, detail:null, hist:[] };
+const $ = s => document.querySelector(s);
+const esc = v => String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const fmt = d => d ? new Date(d).toLocaleString('en-PH', { timeZone:'Asia/Manila', dateStyle:'medium', timeStyle:'short' }) : '-';
+const YEARS = ['2025-2026','2026-2027','2027-2028'];
+
+function toast(msg, err) {
+  const t = $('#toast'); t.textContent = msg; t.className = 'toast' + (err ? ' err' : '');
+  t.style.display = 'block'; clearTimeout(toast.t); toast.t = setTimeout(() => t.style.display = 'none', 4500);
+}
+function friendly(e) {
+  if (!e) return 'Unknown error';
+  if (e.code === '23505') return 'Duplicate: a submission for this academic year and semester already exists.';
+  if (e.code === '23514') return 'Invalid value: GWA must be 1.00-5.00 and counts must be 0 or more.';
+  if (e.code === '42501') return 'Access denied by the database (not allowed for your role).';
+  return e.message || String(e);
+}
+const isStaff = () => S.profile?.role === 'staff';
+const prog = id => S.programs.find(p => p.id === id);
+const assignOf = sid => S.assign.find(a => a.scholar_id === sid);
+const profOf = id => S.profiles.find(p => p.id === id);
+
+// ====== POLICY CHECKS (thresholds come from the programs table) ======
+function runChecks(s, p) {
+  const c = [];
+  const add = (label, ok, text) => c.push({ label, ok, text });
+  add('Evidence reference', !!(s.evidence_ref || '').trim(), s.evidence_ref ? 'Provided: ' + s.evidence_ref : 'Missing');
+  add('GWA', Number(s.gwa) <= Number(p.max_gwa), `GWA ${Number(s.gwa).toFixed(2)} vs max ${Number(p.max_gwa).toFixed(2)}`);
+  add('Enrolled units', s.units >= p.min_units, `${s.units} units vs min ${p.min_units}`);
+  add('Failed subjects', s.failed <= p.max_failed, `${s.failed} failed vs allowed ${p.max_failed}`);
+  add('Incomplete grades', s.inc <= p.max_inc, `${s.inc} incomplete vs allowed ${p.max_inc}`);
+  add('Dropped subjects', s.dropped <= p.max_drop, `${s.dropped} dropped vs allowed ${p.max_drop}`);
+  add('Deadline', new Date(s.submitted_at) <= new Date(p.deadline), `Submitted ${fmt(s.submitted_at)} vs deadline ${fmt(p.deadline)} (Asia/Manila)`);
+  return c;
+}
+function reasonsOf(checks) {
+  const m = { 'GWA':'GWA exceeds the maximum', 'Enrolled units':'Insufficient enrolled units', 'Failed subjects':'Failing subject(s)',
+              'Incomplete grades':'Incomplete grade(s)', 'Dropped subjects':'Too many dropped subjects', 'Deadline':'Late submission', 'Evidence reference':'Missing evidence' };
+  return checks.filter(x => !x.ok).map(x => m[x.label] + ' - ' + x.text);
+}
+
+// ====== BADGES ======
+function bVer(s) { const c = { Verified:'b-ok', Returned:'b-bad', Pending:'b-warn' }[s] || ''; return `<span class="badge ${c}">${esc(s)}</span>`; }
+function bComp(s) { if (!s) return '<span class="badge">Not evaluated</span>'; return `<span class="badge ${s === 'Compliant' ? 'b-ok' : 'b-bad'}">${esc(s)}</span>`; }
+function bRen(s) { if (!s) return '<span class="badge">No decision</span>'; return `<span class="badge ${s === 'Approved' ? 'b-ok' : 'b-warn'}">${esc(s)}</span>`; }
+
+// ====== DATA ======
+async function loadAll() {
+  const [pr, as, pf, sub] = await Promise.all([
+    sb.from('programs').select('*').order('id'),
+    sb.from('assignments').select('*'),
+    sb.from('profiles').select('*').order('student_id'),
+    sb.from('submissions').select('*').order('id')
+  ]);
+  for (const r of [pr, as, pf, sub]) if (r.error) { toast(friendly(r.error), true); }
+  S.programs = pr.data || []; S.assign = as.data || []; S.profiles = pf.data || []; S.subs = sub.data || [];
+}
+async function logH(sid, action, detail) {
+  const { error } = await sb.from('history').insert({ submission_id: sid, actor_id: S.user.id, action, detail });
+  if (error) toast('History log failed: ' + friendly(error), true);
+}
+
+// ====== AUTH ======
+async function init() {
+  const { data } = await sb.auth.getSession();
+  if (data.session) await afterLogin(data.session.user); else renderLogin();
+}
+async function afterLogin(user) {
+  S.user = user;
+  const { data, error } = await sb.from('profiles').select('*').eq('id', user.id).maybeSingle();
+  if (error || !data) { toast('No profile found for this account. Insert it in the profiles table.', true); await sb.auth.signOut(); return renderLogin(); }
+  S.profile = data;
+  await loadAll();
+  render();
+}
+async function doLogin() {
+  const email = $('#em').value.trim(), password = $('#pw').value;
+  if (!email || !password) return toast('Enter email and password', true);
+  const { data, error } = await sb.auth.signInWithPassword({ email, password });
+  if (error) return toast(error.message, true);
+  afterLogin(data.user);
+}
+async function doLogout() { await sb.auth.signOut(); S.user = null; S.profile = null; renderLogin(); }
+
+function renderLogin() {
+  $('#app').innerHTML = `<div class="card login"><h2>Scholarship Monitoring - Login</h2>
+    <label>Email</label><input id="em" type="email" autocomplete="username">
+    <label>Password</label><input id="pw" type="password" autocomplete="current-password">
+    <p><button onclick="doLogin()">Log in</button></p>
+    <p class="mut">Synthetic accounts only.</p></div>`;
+  $('#pw').addEventListener('keydown', e => { if (e.key === 'Enter') doLogin(); });
+}
+
+function shell(inner) {
+  $('#app').innerHTML = `<header><h1>Scholarship Monitoring and Compliance</h1>
+    <div>${esc(S.profile.full_name || S.user.email)} (${esc(S.profile.role)}) &nbsp;<button class="sec" onclick="doLogout()">Log out</button></div></header>
+    <main>${inner}</main>`;
+}
+function render() { isStaff() ? renderStaff() : renderScholar(); }
+
+// ====== SCHOLAR VIEW ======
+function renderScholar() {
+  const a = assignOf(S.user.id), p = a && prog(a.program_id);
+  const mine = S.subs.filter(s => s.scholar_id === S.user.id);
+  const e = S.edit ? mine.find(s => s.id === S.edit) : null;
+  const yearOpts = YEARS.map(y => `<option ${((e && e.academic_year) || S.ay) === y ? 'selected' : ''}>${y}</option>`).join('');
+  const formCard = !a ? `<div class="card"><h2>Not assigned yet</h2><p>Staff must assign you to a scholarship program before you can submit grades.</p></div>` : `
+  <div class="card"><h2>${e ? 'Correct and resubmit' : 'Submit semester grades'} <span class="mut">(${esc(p.name)})</span></h2>
+    <div class="grid">
+      <div><label>Academic year</label><select id="f_ay" ${e ? 'disabled' : ''}>${yearOpts}</select></div>
+      <div><label>Semester</label><select id="f_sem" ${e ? 'disabled' : ''}><option value="1" ${(e ? e.semester : 1) == 1 ? 'selected' : ''}>1</option><option value="2" ${(e ? e.semester : 1) == 2 ? 'selected' : ''}>2</option></select></div>
+      <div><label>GWA (1.00-5.00)</label><input id="f_gwa" type="number" step="0.01" value="${e ? e.gwa : ''}"></div>
+      <div><label>Enrolled units</label><input id="f_units" type="number" step="1" value="${e ? e.units : ''}"></div>
+      <div><label>Failed subjects</label><input id="f_failed" type="number" step="1" value="${e ? e.failed : 0}"></div>
+      <div><label>Incomplete grades</label><input id="f_inc" type="number" step="1" value="${e ? e.inc : 0}"></div>
+      <div><label>Dropped subjects</label><input id="f_drop" type="number" step="1" value="${e ? e.dropped : 0}"></div>
+    </div>
+    <label>Grade-document reference (e.g. file name or link ID)</label><input id="f_ev" value="${esc(e ? e.evidence_ref : '')}">
+    <p><button onclick="submitGrades()">${e ? 'Resubmit' : 'Submit'}</button>
+    ${e ? '<button class="sec" onclick="S.edit=null;render()">Cancel</button>' : ''}</p>
+    <p class="mut">Deadline: ${fmt(p.deadline)} (Asia/Manila). Academic summaries here are not official grades; the Registrar remains the source.</p></div>`;
+  const rows = mine.map(s => `<tr><td>${esc(s.academic_year)} Sem ${s.semester}</td><td>${fmt(s.submitted_at)}</td>
+    <td>${bVer(s.verification_status)}${s.verification_status === 'Returned' ? `<div class="mut">Reason: ${esc(s.verification_reason)}</div>` : ''}</td>
+    <td>${bComp(s.compliance_result)}${(s.compliance_reasons || []).map(r => `<div class="mut">${esc(r)}</div>`).join('')}</td>
+    <td>${bRen(s.renewal_decision)}${s.decision_note ? `<div class="mut">${esc(s.decision_note)}</div>` : ''}</td>
+    <td>${s.verification_status === 'Returned' ? `<button onclick="S.edit=${s.id};render()">Correct</button>` : ''}
+        <button class="sec" onclick="openDetail(${s.id})">History</button></td></tr>`).join('');
+  shell(`${formCard}<div class="card"><h2>My submissions</h2><div class="wrap"><table>
+    <tr><th>Semester</th><th>Submitted</th><th>Submission status</th><th>Compliance</th><th>Renewal</th><th></th></tr>
+    ${rows || '<tr><td colspan="6" class="mut">No submissions yet.</td></tr>'}</table></div></div>`);
+}
+
+async function submitGrades() {
+  const a = assignOf(S.user.id); if (!a) return toast('You are not assigned to a program', true);
+  const e = S.edit ? S.subs.find(s => s.id === S.edit) : null;
+  const gwa = parseFloat($('#f_gwa').value);
+  const nums = { units:$('#f_units').value, failed:$('#f_failed').value, inc:$('#f_inc').value, dropped:$('#f_drop').value };
+  const ev = $('#f_ev').value.trim();
+  if (isNaN(gwa) || gwa < 1 || gwa > 5) return toast('Invalid GWA: must be between 1.00 and 5.00', true);
+  const out = {};
+  for (const [k, v] of Object.entries(nums)) {
+    if (v === '' || !/^\d+$/.test(v)) return toast(`Invalid ${k}: must be a whole number, 0 or more`, true);
+    out[k] = parseInt(v, 10);
+  }
+  if (!ev) return toast('Grade-document reference is required', true);
+  const body = { gwa, units:out.units, failed:out.failed, inc:out.inc, dropped:out.dropped, evidence_ref:ev };
+  if (e) {
+    body.verification_status = 'Pending';
+    const { data, error } = await sb.from('submissions').update(body).eq('id', e.id).select();
+    if (error || !data?.length) return toast(error ? friendly(error) : 'Update was not allowed', true);
+    await logH(e.id, 'Resubmitted', 'Correction submitted; back to Pending verification');
+    S.edit = null; toast('Resubmitted. Status is Pending verification.');
+  } else {
+    Object.assign(body, { scholar_id:S.user.id, academic_year:$('#f_ay').value, semester:parseInt($('#f_sem').value, 10) });
+    const { data, error } = await sb.from('submissions').insert(body).select().single();
+    if (error) return toast(friendly(error), true);
+    await logH(data.id, 'Submitted', `AY ${data.academic_year} Sem ${data.semester}`);
+    toast('Submitted successfully.');
+  }
+  await loadAll(); render();
+}
+
+// ====== STAFF VIEW ======
+function renderStaff() {
+  const yearOpts = YEARS.map(y => `<option ${S.ay === y ? 'selected' : ''}>${y}</option>`).join('');
+  shell(`<div class="tabs">
+      <button class="${S.tab === 'subs' ? 'on' : ''}" onclick="S.tab='subs';render()">Dashboard and submissions</button>
+      <button class="${S.tab === 'sch' ? 'on' : ''}" onclick="S.tab='sch';render()">Scholars and programs</button></div>
+    ${S.tab === 'subs' ? `
+    <div class="card"><div class="row">
+      <div><label>Academic year</label><select onchange="S.ay=this.value;drawStaff()">${yearOpts}</select></div>
+      <div><label>Semester</label><select onchange="S.sem=+this.value;drawStaff()"><option value="1" ${S.sem == 1 ? 'selected' : ''}>1</option><option value="2" ${S.sem == 2 ? 'selected' : ''}>2</option></select></div>
+      <div><label>Search ID or name</label><input value="${esc(S.q)}" oninput="S.q=this.value;drawStaff()"></div>
+      <div><label>Program</label><select onchange="S.fp=this.value;drawStaff()"><option value="">All</option>${S.programs.map(p => `<option value="${p.id}" ${S.fp == p.id ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}</select></div>
+      <div><label>Compliance</label><select onchange="S.fc=this.value;drawStaff()">${['', 'Compliant', 'With Deficiency', 'Not evaluated'].map(v => `<option value="${v}" ${S.fc === v ? 'selected' : ''}>${v || 'All'}</option>`).join('')}</select></div>
+    </div></div>
+    <div id="dash"></div><div class="card"><h2>Submissions</h2><div class="wrap" id="tbl"></div></div>` : `<div id="sch"></div>`}`);
+  S.tab === 'subs' ? drawStaff() : drawScholars();
+}
+
+function drawStaff() {
+  if (S.tab !== 'subs') return;
+  const sem = S.subs.filter(s => s.academic_year === S.ay && s.semester === S.sem);
+  $('#dash').innerHTML = `<div class="stats">
+    <div class="stat"><b>${S.assign.length}</b><span>Total assigned scholars</span></div>
+    <div class="stat"><b>${sem.filter(s => s.verification_status === 'Pending').length}</b><span>Pending verification</span></div>
+    <div class="stat"><b>${sem.filter(s => s.compliance_result === 'Compliant').length}</b><span>Compliant</span></div>
+    <div class="stat"><b>${sem.filter(s => s.compliance_result === 'With Deficiency').length}</b><span>With deficiency</span></div></div>`;
+  const q = S.q.trim().toLowerCase();
+  const list = sem.filter(s => {
+    const pf = profOf(s.scholar_id), a = assignOf(s.scholar_id);
+    if (q && !((pf?.student_id || '').toLowerCase().includes(q) || (pf?.full_name || '').toLowerCase().includes(q))) return false;
+    if (S.fp && String(a?.program_id) !== String(S.fp)) return false;
+    if (S.fc === 'Not evaluated' && s.compliance_result) return false;
+    if (S.fc && S.fc !== 'Not evaluated' && s.compliance_result !== S.fc) return false;
+    return true;
+  });
+  const rows = list.map(s => {
+    const pf = profOf(s.scholar_id), a = assignOf(s.scholar_id), p = a && prog(a.program_id);
+    return `<tr><td>${esc(pf?.student_id)}</td><td>${esc(pf?.full_name)}</td><td>${esc(p?.name)}</td><td>${fmt(s.submitted_at)}</td>
+      <td>${bVer(s.verification_status)}</td><td>${bComp(s.compliance_result)}</td><td>${bRen(s.renewal_decision)}</td>
+      <td><button onclick="openDetail(${s.id})">Open</button></td></tr>`;
+  }).join('');
+  $('#tbl').innerHTML = `<table><tr><th>Student ID</th><th>Name</th><th>Program</th><th>Submitted</th><th>Submission</th><th>Compliance</th><th>Renewal</th><th></th></tr>
+    ${rows || '<tr><td colspan="8" class="mut">No matching submissions.</td></tr>'}</table>`;
+}
+
+function drawScholars() {
+  const scholars = S.profiles.filter(p => p.role === 'scholar');
+  const unassigned = scholars.filter(p => !assignOf(p.id));
+  const progOpts = S.programs.map(p => `<option value="${p.id}">${esc(p.name)}</option>`).join('');
+  $('#sch').innerHTML = `
+  <div class="card"><h2>Register scholar record</h2><div class="row">
+    <div><label>Full name</label><input id="n_name"></div>
+    <div><label>Student ID</label><input id="n_sid"></div>
+    <div><label>Program</label><select id="n_prog">${progOpts}</select></div>
+    <button onclick="registerScholar()">Register and assign</button></div>
+    <p class="mut">Creates a profile record and assignment. A scholar who must log in also needs an account in Supabase Authentication.</p></div>
+  <div class="card"><h2>Assign existing scholar</h2><div class="row">
+    <div><label>Scholar</label><select id="a_sch">${unassigned.map(p => `<option value="${p.id}">${esc(p.student_id)} - ${esc(p.full_name)}</option>`).join('') || '<option value="">(none unassigned)</option>'}</select></div>
+    <div><label>Program</label><select id="a_prog">${progOpts}</select></div>
+    <button onclick="assignScholar()">Assign</button></div></div>
+  <div class="card"><h2>Policy records (read from database)</h2><div class="wrap"><table>
+    <tr><th>Program</th><th>Max GWA</th><th>Min units</th><th>Failed</th><th>INC</th><th>Dropped</th><th>Deadline (Manila)</th></tr>
+    ${S.programs.map(p => `<tr><td>${esc(p.name)}</td><td>${p.max_gwa}</td><td>${p.min_units}</td><td>${p.max_failed}</td><td>${p.max_inc}</td><td>${p.max_drop}</td><td>${fmt(p.deadline)}</td></tr>`).join('')}
+  </table></div></div>
+  <div class="card"><h2>Scholars</h2><div class="wrap"><table><tr><th>Student ID</th><th>Name</th><th>Program</th></tr>
+    ${scholars.map(p => `<tr><td>${esc(p.student_id)}</td><td>${esc(p.full_name)}</td><td>${esc(prog(assignOf(p.id)?.program_id)?.name || 'Not assigned')}</td></tr>`).join('')}
+  </table></div></div>`;
+}
+async function registerScholar() {
+  const name = $('#n_name').value.trim(), sid = $('#n_sid').value.trim(), pid = +$('#n_prog').value;
+  if (!name || !sid) return toast('Name and student ID are required', true);
+  const id = crypto.randomUUID();
+  let r = await sb.from('profiles').insert({ id, full_name:name, student_id:sid, role:'scholar' });
+  if (r.error) return toast(friendly(r.error), true);
+  r = await sb.from('assignments').insert({ scholar_id:id, program_id:pid });
+  if (r.error) return toast(friendly(r.error), true);
+  toast('Scholar registered and assigned.'); await loadAll(); drawScholars();
+}
+async function assignScholar() {
+  const sid = $('#a_sch').value, pid = +$('#a_prog').value;
+  if (!sid) return toast('No scholar selected', true);
+  const { error } = await sb.from('assignments').insert({ scholar_id:sid, program_id:pid });
+  if (error) return toast(friendly(error), true);
+  toast('Assigned.'); await loadAll(); drawScholars();
+}
+
+// ====== DETAIL DIALOG ======
+async function openDetail(id) {
+  S.detail = id;
+  const { data, error } = await sb.from('history').select('*').eq('submission_id', id).order('created_at');
+  if (error) toast(friendly(error), true);
+  S.hist = data || [];
+  drawModal();
+}
+function closeModal() { S.detail = null; const m = $('#modal'); if (m) m.remove(); }
+function drawModal() {
+  const s = S.subs.find(x => x.id === S.detail); if (!s) return;
+  const old = $('#modal'); if (old) old.remove();
+  const pf = profOf(s.scholar_id), a = assignOf(s.scholar_id), p = a && prog(a.program_id);
+  let body = `<h2>${esc(pf?.student_id)} - ${esc(pf?.full_name)} <span class="mut">${esc(p?.name)} | AY ${esc(s.academic_year)} Sem ${s.semester}</span></h2>
+    <div class="grid"><div><span class="mut">GWA</span><br><b>${Number(s.gwa).toFixed(2)}</b></div><div><span class="mut">Units</span><br><b>${s.units}</b></div>
+    <div><span class="mut">Failed</span><br><b>${s.failed}</b></div><div><span class="mut">INC</span><br><b>${s.inc}</b></div><div><span class="mut">Dropped</span><br><b>${s.dropped}</b></div></div>
+    <p>Evidence: <b>${esc(s.evidence_ref)}</b><br>Submitted: ${fmt(s.submitted_at)}</p>
+    <p>Submission: ${bVer(s.verification_status)} &nbsp; Compliance: ${bComp(s.compliance_result)} &nbsp; Renewal: ${bRen(s.renewal_decision)}
+    ${s.verification_reason ? `<br><span class="mut">Return reason: ${esc(s.verification_reason)}</span>` : ''}</p>`;
+  if (isStaff() && p) {
+    if (s.compliance_result) {
+      const ch = runChecks(s, p);
+      body += `<h2>Policy checks</h2>${ch.map(c => `<div class="chk"><span>${c.ok ? '✅' : '❌'}</span><div><b>${esc(c.label)}</b><br><span class="mut">${esc(c.text)}</span></div></div>`).join('')}`;
+      if ((s.compliance_reasons || []).length) body += `<p><b>Deficiency reasons:</b></p><ul>${s.compliance_reasons.map(r => `<li>${esc(r)}</li>`).join('')}</ul>`;
+    }
+    body += `<h2 style="margin-top:14px">Staff actions</h2>
+      <label>Reason (required when returning)</label><textarea id="reason" rows="2"></textarea>
+      <p><button class="ok" onclick="verifySub(${s.id})">Mark Verified</button>
+      <button class="bad" onclick="returnSub(${s.id})">Return</button>
+      <button onclick="evalSub(${s.id})">Evaluate compliance</button></p>
+      <label>Renewal decision</label><select id="dec"><option>Approved</option><option>Held</option></select>
+      <label>Decision note</label><textarea id="note" rows="2">${esc(s.decision_note || '')}</textarea>
+      <p><button onclick="decideSub(${s.id})">Record decision</button></p>`;
+  }
+  body += `<h2 style="margin-top:14px">History</h2>` + (S.hist.length ? `<table>${S.hist.map(h => `<tr><td>${fmt(h.created_at)}</td><td>${esc(h.action)}</td><td>${esc(h.detail)}</td><td class="mut">${esc(profOf(h.actor_id)?.full_name || String(h.actor_id).slice(0, 8))}</td></tr>`).join('')}</table>` : '<p class="mut">No history.</p>');
+  const d = document.createElement('div'); d.id = 'modal'; d.className = 'modal-bg';
+  d.innerHTML = `<div class="modal">${body}<p><button class="sec" onclick="closeModal()">Close</button></p></div>`;
+  document.body.appendChild(d);
+}
+async function refreshDetail() { await loadAll(); const id = S.detail; render(); if (id) openDetail(id); }
+
+// ====== STAFF ACTIONS ======
+async function patch(id, fields) {
+  const { data, error } = await sb.from('submissions').update(fields).eq('id', id).select();
+  if (error) { toast(friendly(error), true); return false; }
+  if (!data?.length) { toast('Denied: you are not allowed to change this record', true); return false; }
+  return true;
+}
+async function verifySub(id) {
+  if (!await patch(id, { verification_status:'Verified', verification_reason:null })) return;
+  await logH(id, 'Verified', 'Evidence verified'); toast('Marked Verified'); refreshDetail();
+}
+async function returnSub(id) {
+  const r = $('#reason').value.trim();
+  if (!r) return toast('A reason is required when returning evidence', true);
+  if (!await patch(id, { verification_status:'Returned', verification_reason:r })) return;
+  await logH(id, 'Returned', r); toast('Returned to scholar'); refreshDetail();
+}
+async function evalSub(id) {
+  const s = S.subs.find(x => x.id === id), a = assignOf(s.scholar_id), p = a && prog(a.program_id);
+  if (s.verification_status !== 'Verified') return toast('Blocked: evidence must be Verified before evaluation', true);
+  if (!p) return toast('Scholar has no program assignment', true);
+  const checks = runChecks(s, p), reasons = reasonsOf(checks);
+  const result = reasons.length ? 'With Deficiency' : 'Compliant';
+  if (!await patch(id, { compliance_result:result, compliance_reasons:reasons })) return;
+  await logH(id, 'Evaluated', result + (reasons.length ? ': ' + reasons.join('; ') : ''));
+  toast('Evaluation: ' + result); refreshDetail();
+}
+async function decideSub(id) {
+  const s = S.subs.find(x => x.id === id);
+  const dec = $('#dec').value, note = $('#note').value.trim();
+  if (s.verification_status !== 'Verified') return toast('Blocked: record is not Verified', true);
+  if (!s.compliance_result) return toast('Blocked: evaluate the record first', true);
+  if (dec === 'Approved' && s.compliance_result !== 'Compliant') return toast('Blocked: cannot approve a record With Deficiency', true);
+  if (!await patch(id, { renewal_decision:dec, decision_note:note || null })) return;
+  await logH(id, 'Renewal ' + dec, note || '(no note)'); toast('Renewal ' + dec); refreshDetail();
+}
+
+init();
+</script>
+</body>
+</html>
